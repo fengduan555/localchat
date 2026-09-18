@@ -130,4 +130,12 @@
 
 ## License
 
-本仓库未附带许可证。若要允许他人使用/修改，建议补一个 MIT。
+## License
+
+**无（No License）**
+
+本仓库未附带任何许可证，**保留所有权利（All rights reserved）**。
+未经作者明确许可，不得复制、分发、修改或用于商业用途。
+
+仓库内的第三方素材 —— `local_chat/assets/` 背景图、`rvc_work/试听/` 与
+`local_chat/data/refs/` 音频样本 —— 版权归各自原作者，仅用于个人测试，请勿再分发。
