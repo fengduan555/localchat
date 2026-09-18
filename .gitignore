@@ -1,0 +1,23 @@
+# ── 隐私: 绝不入库 ──────────────────────────────────────────────
+# 聊天记录数据库（含真实对话内容）
+local_chat/data/memory.db
+local_chat/data/memory.db-shm
+local_chat/data/memory.db-wal
+# 本地配置（含明文 LLM API Key）
+local_chat/config.json
+config.json
+.env
+
+# ── 运行时产物 ─────────────────────────────────────────────────
+*.log
+rvc_work/model.txt
+__pycache__/
+*.pyc
+!local_chat/app_recovered.pyc
+
+# ── 依赖 / 大文件（模型本体不在仓库里）────────────────────────
+venv/
+hf_cache/
+*.pth
+*.index
+*.safetensors

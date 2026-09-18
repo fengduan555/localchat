@@ -1,0 +1,434 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""本地聊天管线: LLM(OpenAI兼容) -> 本地 Kokoro 中文 TTS -> RVC(音色) -> 网页播放。
+
+启动: venv/bin/python local_chat/app.py --port 8770
+依赖: 已运行的 tts_server (8765) + Windows RVC 服务 (8766, 自动拉起)
+
+设计要点 (v2):
+  * 所有阻塞调用 (LLM 流式 / TTS 合成) 都放到线程执行, 绝不阻塞事件循环
+    → 合成繁忙时网页依然秒开
+  * 单次合成/请求带超时, 失败快速返回错误事件, 不会把服务拖死
+  * 并发上限: 最多 N 个合成同时跑 (防 CPU/GPU 抢占)
+"""
+import argparse
+import asyncio
+import base64
+import json
+import os
+import re
+import subprocess
+import threading
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+import anyio
+from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+import uvicorn
+
+HERE = Path(__file__).parent
+ROOT = HERE.parent
+WORK = ROOT / 'rvc_work'
+CFG_FILE = HERE / 'config.json'
+MODEL_TXT = WORK / 'model.txt'
+TTS_URL = os.environ.get('TTS_URL', 'http://localhost:8765')
+WEIGHTS = Path('/mnt/e/download/RVC20260723Nvidia50x0/RVC20260718Nvidia50x0/assets/weights')
+
+TTS_TIMEOUT = float(os.environ.get('CHAT_TTS_TIMEOUT', '75'))    # 单句合成超时(秒)
+LLM_TIMEOUT = float(os.environ.get('CHAT_LLM_TIMEOUT', '60'))    # LLM 请求超时(秒)
+MAX_CONCURRENT_TTS = int(os.environ.get('CHAT_TTS_CONCURRENCY', '2'))
+
+DEFAULT_CFG = {
+    "llm": {
+        "base_url": "",
+        "api_key": "",
+        "model": "",
+        "system_prompt": "你是艾莉，一个温柔、活泼、有点黏人的少女。用口语化的中文回答，每次回复不超过两句话。",
+        "temperature": 0.85,
+        "max_tokens": 300,
+    },
+    "tts": {
+        "voice": "airi",
+        "speed": 1.0,
+        "rvc_model": "airi_e360.pth",
+        "rvc_index_rate": 0.0,
+    },
+    "history_len": 8,
+    # 关闭网页后自动停止后台服务; 刷新不会触发 (宽限期内新页面会发心跳取消)
+    "auto_stop": True,
+    "auto_stop_grace": 20,
+}
+
+app = FastAPI(title='Local Chat (LLM + Kokoro + RVC)')
+
+ASSETS = HERE / 'assets'
+ASSETS.mkdir(exist_ok=True)
+app.mount('/assets', StaticFiles(directory=str(ASSETS)), name='assets')
+
+_tts_sem = threading.BoundedSemaphore(MAX_CONCURRENT_TTS)
+
+# 页面活跃状态: 用于"关闭网页 => 自动停服务"
+_activity = {'last_beat': 0.0, 'bye_at': None}
+_activity_lock = threading.Lock()
+
+
+# ── 配置 ────────────────────────────────────────────────────────────
+
+def load_cfg():
+    if CFG_FILE.exists():
+        try:
+            cfg = json.loads(CFG_FILE.read_text(encoding='utf-8'))
+            for k, v in DEFAULT_CFG.items():
+                if isinstance(v, dict):
+                    cfg.setdefault(k, {})
+                    for kk, vv in v.items():
+                        cfg[k].setdefault(kk, vv)
+                else:
+                    cfg.setdefault(k, v)
+            return cfg
+        except Exception:
+            pass
+    return json.loads(json.dumps(DEFAULT_CFG))
+
+
+def save_cfg(cfg):
+    CFG_FILE.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding='utf-8')
+    apply_rvc_model(cfg['tts'].get('rvc_model'))
+
+
+def apply_rvc_model(name):
+    """写 model.txt -> Windows RVC 服务下次请求自动热切换模型。"""
+    if not name:
+        return
+    try:
+        MODEL_TXT.write_text(name, encoding='utf-8')
+    except Exception as e:
+        print('[MODEL] 切换失败:', e)
+
+
+def list_rvc_models():
+    if not WEIGHTS.is_dir():
+        return []
+    skip = ('airi_e180.pth', 'airi_e540.pth', 'airi_e720.pth', 'airi_e900.pth')
+    out = []
+    for f in sorted(WEIGHTS.glob('*.pth')):
+        if f.name in skip:
+            continue
+        out.append({'file': f.name, 'size_mb': round(f.stat().st_size / 1048576, 1)})
+    return out
+
+
+# ── TTS (阻塞调用, 必须在线程里跑) ──────────────────────────────────
+
+def _synthesize_blocking(text, voice=None, speed=None, index_rate=None):
+    cfg = load_cfg()['tts']
+    payload = {
+        'input': text,
+        'voice': voice or cfg.get('voice', 'airi'),
+        'speed': float(speed if speed is not None else cfg.get('speed', 1.0)),
+        'rvc_model': cfg.get('rvc_model'),
+        'rvc_index_rate': float(index_rate if index_rate is not None
+                                else cfg.get('rvc_index_rate', 0.0)),
+    }
+    req = urllib.request.Request(
+        TTS_URL + '/v1/audio/speech',
+        data=json.dumps(payload, ensure_ascii=False).encode('utf-8'),
+        headers={'Content-Type': 'application/json'})
+    with urllib.request.urlopen(req, timeout=TTS_TIMEOUT) as r:
+        return r.read()
+
+
+async def synthesize_async(text, voice=None, speed=None, index_rate=None):
+    """在线程池里合成 (带并发上限), 不阻塞事件循环。"""
+    def job():
+        with _tts_sem:
+            return _synthesize_blocking(text, voice=voice, speed=speed,
+                                        index_rate=index_rate)
+    return await anyio.to_thread.run_sync(job)
+
+
+# ── 分句 ────────────────────────────────────────────────────────────
+
+SENT_END = '。！？!?；;\n'
+MAX_SENT = 42
+FIRST_MAX_SENT = int(os.environ.get('CHAT_FIRST_SENT_MAX', '18'))   # 首句更短 → 更快出声
+
+
+def split_sentences(buf, flush=False, first=False):
+    """从缓冲区切出完整句子, 返回 (句子列表, 剩余缓冲)。
+
+    first=True 时用更短的阈值 (首句优先出声)。
+    """
+    limit = FIRST_MAX_SENT if first else MAX_SENT
+    out = []
+    while True:
+        m = re.search('[' + re.escape(SENT_END) + ']', buf)
+        if m and m.end() >= 4:
+            out.append(buf[:m.end()].strip())
+            buf = buf[m.end():]
+            continue
+        if len(buf) >= limit:
+            cut = re.search(r'[，,、\s]', buf[limit // 2:limit])
+            idx = (limit // 2 + cut.start() + 1) if cut else limit
+            out.append(buf[:idx].strip())
+            buf = buf[idx:]
+            continue
+        break
+    if flush and buf.strip():
+        out.append(buf.strip())
+        buf = ''
+    return [s for s in out if s], buf
+
+
+def llm_stream(messages, cfg):
+    """OpenAI 兼容流式对话 (阻塞生成器, 由线程消费); 未配置 key 时演示模式。"""
+    llm = cfg['llm']
+    if not llm.get('base_url') or not llm.get('model'):
+        demo = ('（演示模式）还没有配置 LLM，请在左侧填入 Base URL、API Key 和模型名。'
+                '现在你听到的声音，是本地合成再经过音色转换的结果。')
+        for ch in re.findall(r'.{1,6}', demo):
+            yield ch
+            time.sleep(0.02)
+        return
+    url = llm['base_url'].rstrip('/') + '/chat/completions'
+    body = json.dumps({
+        'model': llm['model'],
+        'messages': messages,
+        'stream': True,
+        'temperature': float(llm.get('temperature', 0.85)),
+        'max_tokens': int(llm.get('max_tokens', 300)),
+    }, ensure_ascii=False).encode('utf-8')
+    req = urllib.request.Request(
+        url, data=body,
+        headers={'Content-Type': 'application/json',
+                 'Authorization': 'Bearer ' + (llm.get('api_key') or 'sk-none')})
+    try:
+        with urllib.request.urlopen(req, timeout=LLM_TIMEOUT) as r:
+            for raw in r:
+                line = raw.decode('utf-8', 'replace').strip()
+                if not line.startswith('data:'):
+                    continue
+                data = line[5:].strip()
+                if data == '[DONE]':
+                    break
+                try:
+                    obj = json.loads(data)
+                    delta = (obj.get('choices') or [{}])[0].get('delta', {})
+                    piece = delta.get('content') or ''
+                except Exception:
+                    piece = ''
+                if piece:
+                    yield piece
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode('utf-8', 'replace')[:300]
+        yield f'（LLM 请求失败 HTTP {e.code}: {detail}）'
+    except Exception as e:
+        yield f'（LLM 连接失败: {str(e)[:200]}）'
+
+
+def _pump_llm(messages, cfg, queue, loop):
+    """在线程里跑阻塞的 LLM 流, 把片段投递到 asyncio 队列。"""
+    try:
+        for piece in llm_stream(messages, cfg):
+            loop.call_soon_threadsafe(queue.put_nowait, piece)
+    except Exception as e:
+        loop.call_soon_threadsafe(queue.put_nowait, f'（LLM 异常: {str(e)[:150]}）')
+    finally:
+        loop.call_soon_threadsafe(queue.put_nowait, None)   # 结束哨兵
+
+
+# ── HTTP 接口 ───────────────────────────────────────────────────────
+
+@app.get('/')
+async def index():
+    return HTMLResponse((HERE / 'index.html').read_text(encoding='utf-8'))
+
+
+@app.post('/api/heartbeat')
+async def heartbeat():
+    """网页每 5 秒上报一次: 只要有心跳就不会触发自动停止。"""
+    with _activity_lock:
+        _activity['last_beat'] = time.time()
+        _activity['bye_at'] = None          # 页面回来了 (刷新/新开) → 取消关闭
+    return {'ok': True,
+            'auto_stop': bool(load_cfg().get('auto_stop', True)),
+            'grace': float(load_cfg().get('auto_stop_grace', 20))}
+
+
+@app.post('/api/bye')
+async def bye():
+    """网页关闭时 (sendBeacon) 上报; 宽限期内没有新心跳才真正停止服务。"""
+    with _activity_lock:
+        _activity['bye_at'] = time.time()
+    return {'ok': True}
+
+
+def _autostop_watchdog():
+    """后台线程: 页面关闭且超过宽限期 → 调 stop_all.sh 停掉所有服务。"""
+    while True:
+        time.sleep(2)
+        try:
+            cfg = load_cfg()
+            if not cfg.get('auto_stop', True):
+                continue
+            grace = float(cfg.get('auto_stop_grace', 20))
+            with _activity_lock:
+                bye = _activity['bye_at']
+                beat = _activity['last_beat']
+            now = time.time()
+            if bye and (now - bye) > grace and (now - beat) > grace:
+                print('[AUTOSTOP] 网页已关闭 %.0f 秒, 停止后台服务' % (now - bye),
+                      flush=True)
+                subprocess.Popen(['bash', str(HERE / 'stop_all.sh')],
+                                 start_new_session=True,
+                                 stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL)
+                time.sleep(4)
+                os._exit(0)
+        except Exception as e:
+            print('[AUTOSTOP] 检查异常: %s' % str(e)[:150], flush=True)
+
+
+@app.get('/api/config')
+async def get_config():
+    return {'config': load_cfg(), 'models': list_rvc_models()}
+
+
+@app.post('/api/config')
+async def set_config(request: Request):
+    patch = await request.json()
+    cfg = load_cfg()
+    for sec in ('llm', 'tts'):
+        if sec in patch:
+            cfg[sec].update(patch[sec])
+    if 'history_len' in patch:
+        cfg['history_len'] = int(patch['history_len'])
+    if 'auto_stop' in patch:
+        cfg['auto_stop'] = bool(patch['auto_stop'])
+    if 'auto_stop_grace' in patch:
+        cfg['auto_stop_grace'] = max(3, int(patch['auto_stop_grace']))
+    await anyio.to_thread.run_sync(save_cfg, cfg)
+    return {'ok': True, 'config': cfg}
+
+
+@app.post('/api/model')
+async def set_model(request: Request):
+    body = await request.json()
+    name = body.get('name')
+    cfg = load_cfg()
+    cfg['tts']['rvc_model'] = name
+    await anyio.to_thread.run_sync(save_cfg, cfg)
+    return {'ok': True, 'model': name}
+
+
+@app.post('/api/tts')
+async def tts_test(request: Request):
+    body = await request.json()
+    text = (body.get('text') or '你好，我是艾莉。').strip()
+    t0 = time.time()
+    try:
+        wav = await asyncio.wait_for(
+            synthesize_async(text, voice=body.get('voice'),
+                             speed=body.get('speed'),
+                             index_rate=body.get('rvc_index_rate')),
+            timeout=TTS_TIMEOUT + 10)
+    except asyncio.TimeoutError:
+        return JSONResponse({'error': '合成超时（服务可能正在切换模型或预热）'},
+                            status_code=504)
+    except Exception as e:
+        return JSONResponse({'error': str(e)[:300]}, status_code=502)
+    print('[TTS] %s | %.2fs | %d bytes' % (text[:20], time.time() - t0, len(wav)),
+          flush=True)
+    return Response(content=wav, media_type='audio/wav')
+
+
+@app.post('/api/chat')
+async def chat(request: Request):
+    body = await request.json()
+    text = (body.get('text') or '').strip()
+    history = body.get('history') or []
+    cfg = load_cfg()
+
+    async def gen():
+        t_start = time.time()
+        messages = [{'role': 'system', 'content': cfg['llm']['system_prompt']}]
+        messages += [{'role': h.get('role', 'user'), 'content': h.get('content', '')}
+                     for h in history[-int(cfg.get('history_len', 8)):]]
+        messages.append({'role': 'user', 'content': text})
+
+        loop = asyncio.get_running_loop()
+        queue = asyncio.Queue()
+        threading.Thread(target=_pump_llm,
+                         args=(messages, cfg, queue, loop), daemon=True).start()
+
+        async def emit_sentence(s, idx):
+            t0 = time.time()
+            try:
+                wav = await asyncio.wait_for(synthesize_async(s),
+                                             timeout=TTS_TIMEOUT + 10)
+                return {'type': 'audio', 'index': idx, 'text': s,
+                        'audio': base64.b64encode(wav).decode(),
+                        'elapsed': round(time.time() - t0, 2)}
+            except asyncio.TimeoutError:
+                return {'type': 'error', 'text': '合成超时（切换模型/预热中？）'}
+            except Exception as e:
+                return {'type': 'error', 'text': str(e)[:200]}
+
+        buf = ''
+        full = ''
+        idx = 0
+        while True:
+            piece = await queue.get()
+            if piece is None:
+                break
+            full += piece
+            buf += piece
+            yield 'data: ' + json.dumps({'type': 'delta', 'text': piece},
+                                        ensure_ascii=False) + '\n\n'
+            sentences, buf = split_sentences(buf, first=(idx == 0))
+            for s in sentences:
+                idx += 1
+                ev = await emit_sentence(s, idx)
+                yield 'data: ' + json.dumps(ev, ensure_ascii=False) + '\n\n'
+
+        sentences, buf = split_sentences(buf, flush=True)
+        for s in sentences:
+            idx += 1
+            ev = await emit_sentence(s, idx)
+            yield 'data: ' + json.dumps(ev, ensure_ascii=False) + '\n\n'
+
+        yield 'data: ' + json.dumps({'type': 'done', 'text': full,
+                                     'total': round(time.time() - t_start, 2)},
+                                    ensure_ascii=False) + '\n\n'
+        print('[CHAT] %d 字, %d 句, 总 %.2fs' % (len(full), idx,
+                                               time.time() - t_start), flush=True)
+
+    return StreamingResponse(gen(), media_type='text/event-stream')
+
+
+def _warm_up_tts():
+    """启动时后台预热一次完整链路 (把冷启动开销挪到启动阶段)。"""
+    try:
+        t0 = time.time()
+        _synthesize_blocking('预热。')
+        print('[WARM] TTS 链路预热完成 %.2fs' % (time.time() - t0), flush=True)
+    except Exception as e:
+        print('[WARM] 预热失败 (不影响使用): %s' % str(e)[:150], flush=True)
+
+
+if __name__ == '__main__':
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--port', type=int, default=8770)
+    ap.add_argument('--host', default='0.0.0.0')
+    args = ap.parse_args()
+    apply_rvc_model(load_cfg()['tts'].get('rvc_model'))
+    threading.Thread(target=_warm_up_tts, daemon=True).start()
+    threading.Thread(target=_autostop_watchdog, daemon=True).start()
+    print('本地聊天: http://localhost:%d  (TTS 后端 %s, 合成并发 %d, 关页自动停止=%s)'
+          % (args.port, TTS_URL, MAX_CONCURRENT_TTS,
+             '开' if load_cfg().get('auto_stop', True) else '关'), flush=True)
+    uvicorn.run(app, host=args.host, port=args.port, log_level='warning')

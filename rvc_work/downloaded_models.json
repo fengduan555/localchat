@@ -1,0 +1,141 @@
+{
+  "models": [
+    {
+      "tag": "11Wanderer",
+      "name": "Wanderer_RVC.pth",
+      "size": 55225574,
+      "url": "https://github.com/Hanazar-Games/RVC-voice-models/releases/download/11Wanderer/Wanderer_RVC.pth"
+    },
+    {
+      "tag": "10Shogun",
+      "name": "Reiden.Shogun.V5.pth",
+      "size": 57586706,
+      "url": "https://github.com/Hanazar-Games/RVC-voice-models/releases/download/10Shogun/Reiden.Shogun.V5.pth"
+    },
+    {
+      "tag": "9Nahida",
+      "name": "Nahida_RVC.pth",
+      "size": 55224656,
+      "url": "https://github.com/Hanazar-Games/RVC-voice-models/releases/download/9Nahida/Nahida_RVC.pth"
+    },
+    {
+      "tag": "8Villager",
+      "name": "villagerminecraft.pth",
+      "size": 57587165,
+      "url": "https://github.com/Hanazar-Games/RVC-voice-models/releases/download/8Villager/villagerminecraft.pth"
+    },
+    {
+      "tag": "7Firefly",
+      "name": "Liuying_RVC.pth",
+      "size": 55225115,
+      "url": "https://github.com/Hanazar-Games/RVC-voice-models/releases/download/7Firefly/Liuying_RVC.pth"
+    },
+    {
+      "tag": "6Hutao",
+      "name": "HU.TAO.V2.pth",
+      "size": 57583493,
+      "url": "https://github.com/Hanazar-Games/RVC-voice-models/releases/download/6Hutao/HU.TAO.V2.pth"
+    },
+    {
+      "tag": "6Hutao",
+      "name": "Hutao_RVC.pth",
+      "size": 55224197,
+      "url": "https://github.com/Hanazar-Games/RVC-voice-models/releases/download/6Hutao/Hutao_RVC.pth"
+    },
+    {
+      "tag": "5Furina",
+      "name": "The.LAST.F20.pth",
+      "size": 55225574,
+      "url": "https://github.com/Hanazar-Games/RVC-voice-models/releases/download/5Furina/The.LAST.F20.pth"
+    },
+    {
+      "tag": "4Ayaka",
+      "name": "Ayaka_RVC.pth",
+      "size": 55224197,
+      "url": "https://github.com/Hanazar-Games/RVC-voice-models/releases/download/4Ayaka/Ayaka_RVC.pth"
+    },
+    {
+      "tag": "3Arlecchino",
+      "name": "Alleiqinno_RVC.pth",
+      "size": 55226492,
+      "url": "https://github.com/Hanazar-Games/RVC-voice-models/releases/download/3Arlecchino/Alleiqinno_RVC.pth"
+    },
+    {
+      "tag": "2March_7",
+      "name": "March7_RVC.pth",
+      "size": 55224656,
+      "url": "https://github.com/Hanazar-Games/RVC-voice-models/releases/download/2March_7/March7_RVC.pth"
+    },
+    {
+      "tag": "1Elysia",
+      "name": "ALXY_RVC.pth",
+      "size": 55223738,
+      "url": "https://github.com/Hanazar-Games/RVC-voice-models/releases/download/1Elysia/ALXY_RVC.pth"
+    }
+  ],
+  "downloaded": [
+    "Wanderer_RVC.pth",
+    "Reiden.Shogun.V5.pth",
+    "Nahida_RVC.pth",
+    "villagerminecraft.pth",
+    "Liuying_RVC.pth",
+    "HU.TAO.V2.pth",
+    "Hutao_RVC.pth",
+    "The.LAST.F20.pth",
+    "Ayaka_RVC.pth",
+    "Alleiqinno_RVC.pth",
+    "March7_RVC.pth",
+    "ALXY_RVC.pth"
+  ],
+  "failed": [],
+  "verify": [
+    {
+      "name": "Wanderer_RVC.pth",
+      "verify": "OK info=300epoch sr=40k f0=1 ver=v2 keys=457"
+    },
+    {
+      "name": "Reiden.Shogun.V5.pth",
+      "verify": "OK info=215epoch sr=48k f0=1 ver=v2 keys=457"
+    },
+    {
+      "name": "Nahida_RVC.pth",
+      "verify": "OK info=300epoch sr=40k f0=1 ver=v2 keys=457"
+    },
+    {
+      "name": "villagerminecraft.pth",
+      "verify": "OK info=1000epoch sr=48k f0=1 ver=v2 keys=457"
+    },
+    {
+      "name": "Liuying_RVC.pth",
+      "verify": "OK info=300epoch sr=40k f0=1 ver=v2 keys=457"
+    },
+    {
+      "name": "HU.TAO.V2.pth",
+      "verify": "OK info=346epoch sr=48k f0=1 ver=v2 keys=457"
+    },
+    {
+      "name": "Hutao_RVC.pth",
+      "verify": "OK info=200epoch sr=40k f0=1 ver=v2 keys=457"
+    },
+    {
+      "name": "The.LAST.F20.pth",
+      "verify": "OK info=229epoch sr=40k f0=1 ver=v2 keys=457"
+    },
+    {
+      "name": "Ayaka_RVC.pth",
+      "verify": "OK info=300epoch sr=40k f0=1 ver=v2 keys=457"
+    },
+    {
+      "name": "Alleiqinno_RVC.pth",
+      "verify": "OK info=300epoch sr=40k f0=1 ver=v2 keys=457"
+    },
+    {
+      "name": "March7_RVC.pth",
+      "verify": "OK info=300epoch sr=40k f0=1 ver=v2 keys=457"
+    },
+    {
+      "name": "ALXY_RVC.pth",
+      "verify": "OK info=300epoch sr=40k f0=1 ver=v2 keys=457"
+    }
+  ]
+}
